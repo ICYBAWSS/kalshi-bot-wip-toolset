@@ -14,3 +14,8 @@ playwright/driver/
 
 # Environment files
 .env
+
+# Ignore virtual environment and site-packages
+lib/
+*.dylib
+playwright/driver/
