@@ -1,2 +1,16 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
+# Python build artifacts
+__pycache__/
+*.pyc
 
+# Node/Playwright
+node_modules/
+playwright/driver/
+
+# Large native libs (macOS specific)
+*.dylib
+
+# Compressed files
+*.zip
+
+# Environment files
+.env
