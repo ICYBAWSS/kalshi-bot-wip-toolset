@@ -1,0 +1,100 @@
+from tweety import Twitter
+import os
+import time
+import json
+
+def refresh_twitter_auth():
+    """
+    Script to create a fresh Twitter authentication session.
+    This removes old sessions and creates a new one with proper verification.
+    """
+    print("Starting Twitter authentication refresh...")
+    
+    # 1. Remove existing session files
+    session_file = "twitter_session.tw_session"
+    if os.path.exists(session_file):
+        print(f"Removing existing session file: {session_file}")
+        os.remove(session_file)
+        print("Old session file removed.")
+    
+    # 2. Initialize a new Twitter session
+    print("\nCreating new Twitter session...")
+    app = Twitter("twitter_session")
+    
+    # 3. Authenticate with credentials
+    username = "scrapeeeey76748"  # Replace with your actual username
+    password = "bottt678$"  # Replace with your actual password
+    
+    print(f"Attempting to sign in as {username}...")
+    
+    try:
+        # First try normal login
+        app.sign_in(username, password)
+        print("Successfully signed in!")
+    except Exception as e:
+        print(f"Initial sign-in failed: {e}")
+        print("Trying alternative authentication method...")
+        
+        try:
+            # Some accounts might need to handle additional verification
+            # This is a more explicit approach using Twitter's internal methods
+            app._set_session()
+            app._init_guest_token()
+            app._sign_in(username, password)
+            print("Successfully signed in using alternative method!")
+        except Exception as e2:
+            print(f"Alternative authentication also failed: {e2}")
+            print("\nSuggestions:")
+            print("1. Check if your Twitter credentials are correct")
+            print("2. Verify your account isn't locked or requiring verification")
+            print("3. Try creating a new Twitter account for scraping")
+            return False
+    
+    # 4. Verify session is working
+    print("\nVerifying session...")
+    try:
+        # Try to get the user's own profile as a test
+        user_info = app.me
+        print(f"Session verified! Logged in as: {user_info.username} (ID: {user_info.id})")
+        
+        # Try a simple search for a non-controversial term
+        print("\nTesting search functionality with 'weather'...")
+        test_search = app.search("weather")
+        if test_search:
+            print(f"Search test successful! Found {len(test_search)} tweets.")
+        else:
+            print("Search returned no results. This might indicate a problem.")
+        
+        # Check session file
+        if os.path.exists(session_file):
+            file_size = os.path.getsize(session_file)
+            print(f"\nSession file created successfully. Size: {file_size} bytes")
+            
+            # Try to display some basic session info
+            try:
+                with open(session_file, 'r') as f:
+                    session_data = json.load(f)
+                    # Show some basic info without exposing tokens
+                    print(f"Session contains {len(session_data.keys())} keys")
+                    if 'cookies' in session_data:
+                        print(f"Cookie count: {len(session_data['cookies'])}")
+            except:
+                print("Could not read session file details (might be in binary format)")
+        else:
+            print("\nWARNING: Session file not found even after successful login.")
+            
+        return True
+        
+    except Exception as e:
+        print(f"Session verification failed: {e}")
+        print("\nThe session may not be fully functional.")
+        return False
+
+if __name__ == "__main__":
+    success = refresh_twitter_auth()
+    if success:
+        print("\n=== Authentication refresh completed successfully! ===")
+        print("You can now run your Twitter scraper with the fresh session.")
+    else:
+        print("\n=== Authentication refresh failed! ===")
+        print("Please check the error messages above for troubleshooting.")

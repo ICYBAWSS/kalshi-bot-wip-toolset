@@ -1,0 +1,285 @@
+import requests
+import sqlite3
+import time
+import datetime
+import os
+import logging
+import random
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("spotify_scraper.log"),
+        logging.StreamHandler()
+    ]
+)
+
+# Database configuration
+DB_NAME = "spotify_charts.db"
+
+def initialize_database():
+    """Create SQLite database and tables if they don't exist"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Create tracks table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS tracks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id TEXT,
+        name TEXT,
+        artist TEXT,
+        UNIQUE(track_id)
+    )
+    ''')
+    
+    # Create chart_entries table for daily chart positions
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS chart_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id TEXT,
+        chart_date DATE,
+        chart_type TEXT,
+        region TEXT,
+        position INTEGER,
+        streams INTEGER,
+        days_on_chart INTEGER,
+        FOREIGN KEY (track_id) REFERENCES tracks(track_id),
+        UNIQUE(track_id, chart_date, chart_type, region)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    logging.info("Database initialized successfully.")
+
+def setup_webdriver():
+    """Setup headless Chrome webdriver"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    
+    # Add user agent to avoid detection
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36")
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
+
+def check_date_exists(chart_date, chart_type, region):
+    """Check if data for a specific date, chart type and region already exists in the database"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT COUNT(*) FROM chart_entries 
+    WHERE chart_date = ? AND chart_type = ? AND region = ?
+    ''', (chart_date, chart_type, region))
+    
+    count = cursor.fetchone()[0]
+    conn.close()
+    
+    return count > 0
+
+def get_chart_data(chart_type="top200", region="global", date=None):
+    """
+    Scrape chart data from Spotify Charts
+    
+    Parameters:
+    - chart_type: 'top200' or 'viral50'
+    - region: 'global' or country code (e.g., 'us', 'gb')
+    - date: date in YYYY-MM-DD format, None for latest
+    
+    Returns:
+    - List of track data dictionaries
+    """
+    driver = setup_webdriver()
+    
+    # Construct URL
+    date_str = "" if date is None else f"/{date}"
+    url = f"https://charts.spotify.com/charts/{chart_type}/{region}{date_str}"
+    
+    logging.info(f"Scraping URL: {url}")
+    driver.get(url)
+    
+    # Wait for chart data to load
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='chart-table']"))
+        )
+    except TimeoutException:
+        logging.error(f"Timeout waiting for chart to load for {date_str}")
+        driver.quit()
+        return []
+    
+    # Give additional time for JavaScript to fully render the content
+    time.sleep(3)
+    
+    # Parse the chart data
+    chart_data = []
+    try:
+        # Get the table rows
+        rows = driver.find_elements(By.CSS_SELECTOR, "[data-testid='chart-table'] tbody tr")
+        
+        for row in rows:
+            try:
+                position = row.find_element(By.CSS_SELECTOR, "td:nth-child(1)").text.strip()
+                
+                # Handle "New" indicator
+                if not position.isdigit():
+                    try:
+                        position = row.find_element(By.CSS_SELECTOR, "td:nth-child(1) span").get_attribute("aria-label")
+                        position = ''.join(filter(str.isdigit, position))
+                    except:
+                        position = "0"  # Default if we can't parse
+                
+                # Extract track name and artist
+                track_element = row.find_element(By.CSS_SELECTOR, "td:nth-child(2)")
+                track_name = track_element.find_element(By.CSS_SELECTOR, "a").text.strip()
+                artist = track_element.find_element(By.CSS_SELECTOR, "span").text.strip()
+                
+                # Extract streams or trend info
+                try:
+                    streams = row.find_element(By.CSS_SELECTOR, "td:nth-child(4)").text.strip()
+                    streams = int(streams.replace(',', ''))
+                except:
+                    streams = 0
+                
+                # Extract days on chart if available
+                try:
+                    days_on_chart = row.find_element(By.CSS_SELECTOR, "td:nth-child(5)").text.strip()
+                    days_on_chart = int(days_on_chart)
+                except:
+                    days_on_chart = 1
+                
+                # Generate consistent track_id from track name and artist
+                track_id = f"{track_name}_{artist}".replace(" ", "_").lower()
+                
+                chart_data.append({
+                    "position": int(position),
+                    "track_id": track_id,
+                    "name": track_name,
+                    "artist": artist,
+                    "streams": streams,
+                    "days_on_chart": days_on_chart
+                })
+                
+            except Exception as e:
+                logging.error(f"Error parsing row: {e}")
+                continue
+                
+    except Exception as e:
+        logging.error(f"Error scraping chart data: {e}")
+    
+    driver.quit()
+    return chart_data
+
+def store_chart_data(chart_data, chart_type, region, chart_date=None):
+    """Store scraped chart data in SQLite database"""
+    if not chart_data:
+        logging.warning(f"No chart data to store for {chart_date}")
+        return 0
+    
+    if chart_date is None:
+        chart_date = datetime.date.today().isoformat()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    entries_added = 0
+    
+    for entry in chart_data:
+        # First, store or update track info
+        cursor.execute('''
+        INSERT OR IGNORE INTO tracks (track_id, name, artist)
+        VALUES (?, ?, ?)
+        ''', (entry["track_id"], entry["name"], entry["artist"]))
+        
+        # Then, try to store chart position
+        try:
+            cursor.execute('''
+            INSERT INTO chart_entries 
+            (track_id, chart_date, chart_type, region, position, streams, days_on_chart)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                entry["track_id"], 
+                chart_date, 
+                chart_type, 
+                region,
+                entry["position"],
+                entry.get("streams", 0),
+                entry.get("days_on_chart", 1)
+            ))
+            entries_added += 1
+        except sqlite3.IntegrityError:
+            # Entry already exists, skip
+            pass
+    
+    conn.commit()
+    conn.close()
+    logging.info(f"Stored {entries_added} new entries for {chart_type} chart in {region} on {chart_date}")
+    return entries_added
+
+def scrape_past_year_data():
+    """Scrape chart data for the past year, checking existing entries"""
+    today = datetime.date.today()
+    start_date = today - datetime.timedelta(days=365)  # Past year
+    
+    # Create a list of dates to scrape
+    dates_to_scrape = []
+    current_date = start_date
+    while current_date <= today:
+        dates_to_scrape.append(current_date)
+        current_date += datetime.timedelta(days=1)
+    
+    # Settings
+    chart_types = ["top200"]
+    regions = ["global", "us"]
+    
+    total_entries_added = 0
+    
+    # Process each date
+    for date in dates_to_scrape:
+        date_str = date.isoformat()
+        
+        for chart_type in chart_types:
+            for region in regions:
+                # Check if this data already exists in the database
+                if check_date_exists(date_str, chart_type, region):
+                    logging.info(f"Data for {date_str}, {chart_type}, {region} already exists. Skipping.")
+                    continue
+                
+                logging.info(f"Scraping data for {date_str}, {chart_type}, {region}")
+                
+                # Scrape and store data
+                chart_data = get_chart_data(chart_type=chart_type, region=region, date=date_str)
+                entries_added = store_chart_data(chart_data, chart_type, region, date_str)
+                total_entries_added += entries_added
+                
+                # Add random delay to avoid overloading the server
+                delay = random.uniform(3.0, 8.0)
+                time.sleep(delay)
+    
+    return total_entries_added
+
+def main():
+    # Initialize database
+    initialize_database()
+    
+    # Scrape data for the past year
+    logging.info("Starting to scrape Spotify Charts for the past year...")
+    total_entries = scrape_past_year_data()
+    
+    logging.info(f"Scraping completed. Added {total_entries} new chart entries to the database.")
+
+if __name__ == "__main__":
+    main()
