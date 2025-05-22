@@ -161,9 +161,9 @@ def login_to_spotify(driver, email, password, is_backup=False):
         else:
             raise Exception("Login failed with both primary and backup credentials")
 
-def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, position_limit=50):
+def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection):
     """
-    Scrape chart data from top entries of Spotify Charts.
+    Scrape chart data from top 50 entries of Spotify Charts.
     
     Args:
         driver (webdriver.Chrome): The Selenium WebDriver instance.
@@ -171,7 +171,6 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
         chart_date (str): The date of the chart ('latest' or 'YYYY-MM-DD').
         chart_type (str): The type of chart (e.g., 'global', 'usa').
         db_connection: Database connection to save entries incrementally.
-        position_limit (int): Maximum number of positions to scrape.
 
     Returns:
         list: A list of dictionaries, where each dictionary represents a song entry.
@@ -218,21 +217,21 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
                 display_date = datetime.datetime.now().strftime('%Y-%m-%d')
                 print(f"Using current date: {display_date}")
         
-        print(f"\nScraping top {position_limit} entries from {chart_type} chart for {display_date}")
+        print(f"\nScraping top 50 entries from {chart_type} chart for {display_date}")
         logging.info(f"Scraping chart for date: {display_date}")
         
         # Get all chart rows
         chart_rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
         
-        # Only take up to position_limit rows
-        top_rows = chart_rows[:position_limit]
+        # Only take the top 50 rows
+        top_20_rows = chart_rows[:50]
         
-        print(f"Found {len(top_rows)} rows for top {position_limit} chart entries")
-        logging.info(f"Found {len(top_rows)} rows for top {position_limit} chart entries")
+        print(f"Found {len(top_20_rows)} rows for top 20 chart entries")
+        logging.info(f"Found {len(top_20_rows)} rows for top 20 chart entries")
 
         # Process the rows
         chart_data = []
-        for i, row in enumerate(top_rows):
+        for i, row in enumerate(top_20_rows):
             print(f"Processing entry #{i+1}...")
             
             # Take screenshot of this row
@@ -438,7 +437,7 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
 
 def get_release_date_with_crawl4ai(title, artist):
     """
-    Get release date information using crawl4ai.
+    Get release date information using crawl4ai, focusing only on Wikipedia.
     
     Args:
         title (str): Song title
@@ -459,10 +458,6 @@ def get_release_date_with_crawl4ai(title, artist):
         
         print(f"Cleaned search terms: title='{clean_title}', artist='{clean_artist}'")
         
-        # Create search query for Google
-        search_query = f"{clean_title} {clean_artist} song release date"
-        search_url = f"https://www.google.com/search?q={search_query}"
-        
         # Define async function to run the crawler
         async def run_crawler():
             async with AsyncWebCrawler() as crawler:
@@ -473,61 +468,28 @@ def get_release_date_with_crawl4ai(title, artist):
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
                 )
                 
-                # Execute the crawl
-                result = await crawler.arun(url=search_url, config=config)
-                
-                # Check if we got a valid result
-                if result and result.markdown:
-                    # Look for date patterns in the markdown content
-                    markdown_content = result.markdown
-                    
-                    # Common date formats
-                    date_patterns = [
-                        r'(\d{4}-\d{2}-\d{2})',  # YYYY-MM-DD
-                        r'([A-Z][a-z]+ \d{1,2},? \d{4})',  # Month DD, YYYY
-                        r'(\d{1,2} [A-Z][a-z]+ \d{4})',  # DD Month YYYY
-                        r'Released on (\d{1,2} [A-Z][a-z]+ \d{4})',  # Released on DD Month YYYY
-                        r'Released: (\d{1,2} [A-Z][a-z]+ \d{4})',  # Released: DD Month YYYY
-                        r'Release date: ([A-Z][a-z]+ \d{1,2},? \d{4})',  # Release date: Month DD, YYYY
-                        r'Released in (\d{4})'  # Released in YYYY
-                    ]
-                    
-                    for pattern in date_patterns:
-                        matches = re.findall(pattern, markdown_content)
-                        if matches:
-                            date_str = matches[0]
-                            print(f"Found potential release date: {date_str}")
-                            
-                            # Try to convert to YYYY-MM-DD format
-                            try:
-                                # Try different date formats
-                                for fmt in ['%Y-%m-%d', '%B %d, %Y', '%B %d %Y', '%d %B %Y']:
-                                    try:
-                                        date_obj = datetime.datetime.strptime(date_str, fmt)
-                                        formatted_date = date_obj.strftime('%Y-%m-%d')
-                                        print(f"Converted to: {formatted_date}")
-                                        return formatted_date
-                                    except ValueError:
-                                        continue
-                                
-                                # If we couldn't parse but found a year
-                                year_match = re.search(r'(\d{4})', date_str)
-                                if year_match:
-                                    year = year_match.group(1)
-                                    formatted_date = f"{year}-01-01"
-                                    print(f"Using year only: {formatted_date}")
-                                    return formatted_date
-                            except Exception as e:
-                                print(f"Error parsing date: {e}")
-                
-                # If we couldn't find a release date, try Wikipedia
-                wiki_url = f"https://en.wikipedia.org/wiki/{clean_title.replace(' ', '_')}_({clean_artist.replace(' ', '_')}_song)"
+                # Try Wikipedia directly - more reliable for release dates
+                # Format the Wikipedia URL for the song
+                wiki_url = f"https://en.wikipedia.org/wiki/{clean_title.replace(' ', '_')}"
                 try:
+                    print(f"Trying Wikipedia URL: {wiki_url}")
                     wiki_result = await crawler.arun(url=wiki_url, config=config)
+                    
                     if wiki_result and wiki_result.markdown:
                         wiki_content = wiki_result.markdown
                         
                         # Look for release date in Wikipedia content
+                        date_patterns = [
+                            r'Released.*?(\d{1,2} [A-Z][a-z]+ \d{4})',  # Released: DD Month YYYY
+                            r'Released.*?([A-Z][a-z]+ \d{1,2},? \d{4})',  # Released: Month DD, YYYY
+                            r'Release date.*?(\d{1,2} [A-Z][a-z]+ \d{4})',  # Release date: DD Month YYYY
+                            r'Release date.*?([A-Z][a-z]+ \d{1,2},? \d{4})',  # Release date: Month DD, YYYY
+                            r'Released in (\d{4})',  # Released in YYYY
+                            r'Released: (\d{4})',  # Released: YYYY
+                            r'Released (\d{4})',  # Released YYYY
+                            r'(\d{4}-\d{2}-\d{2})',  # YYYY-MM-DD
+                        ]
+                        
                         for pattern in date_patterns:
                             matches = re.findall(pattern, wiki_content)
                             if matches:
@@ -557,6 +519,36 @@ def get_release_date_with_crawl4ai(title, artist):
                                     print(f"Error parsing Wikipedia date: {e}")
                 except Exception as e:
                     print(f"Error with Wikipedia search: {e}")
+                
+                # Try artist's Wikipedia page as fallback
+                artist_wiki_url = f"https://en.wikipedia.org/wiki/{clean_artist.replace(' ', '_')}"
+                try:
+                    print(f"Trying artist Wikipedia URL: {artist_wiki_url}")
+                    artist_wiki_result = await crawler.arun(url=artist_wiki_url, config=config)
+                    
+                    if artist_wiki_result and artist_wiki_result.markdown:
+                        artist_wiki_content = artist_wiki_result.markdown
+                        
+                        # Look for the song name in the artist's page
+                        song_section = re.search(f"(?i).*{re.escape(clean_title)}.*", artist_wiki_content)
+                        if song_section:
+                            # Extract a section around the song mention
+                            section_start = max(0, song_section.start() - 500)
+                            section_end = min(len(artist_wiki_content), song_section.end() + 500)
+                            relevant_section = artist_wiki_content[section_start:section_end]
+                            
+                            # Look for years in this section
+                            year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', relevant_section)
+                            if year_matches:
+                                # Use the first year that appears after the song name
+                                for year in year_matches:
+                                    # Validate the year is not in the future
+                                    current_year = datetime.datetime.now().year
+                                    if int(year) <= current_year:
+                                        print(f"Found year in artist's Wikipedia page: {year}")
+                                        return f"{year}-01-01"
+                except Exception as e:
+                    print(f"Error with artist Wikipedia search: {e}")
                 
                 return ""
         
@@ -1368,34 +1360,11 @@ def get_chart_types():
     """Return predefined chart types to scrape."""
     return ['global', 'usa']  # Both chart types
 
-def get_user_preferences():
-    """Get user preferences for scraping."""
-    try:
-        # Ask for number of days to scrape
-        days_input = input("How many days of chart data would you like to scrape? (default: 7): ")
-        days = int(days_input) if days_input.strip() else 7
-        
-        # Ask for position limit
-        position_input = input("Up to what position would you like to scrape? (default: 50, max: 200): ")
-        position_limit = int(position_input) if position_input.strip() else 50
-        
-        # Ensure position limit is within acceptable range
-        position_limit = min(max(position_limit, 1), 200)
-        
-        return days, position_limit
-    except ValueError:
-        print("Invalid input. Using default values: 7 days, top 50 positions.")
-        return 7, 50
-
 def main():
     try:
         print("\n" + "="*50)
         print("SPOTIFY CHARTS SCRAPER - IMPROVED VERSION".center(50))
         print("="*50)
-        
-        # Get user preferences
-        days_to_scrape, position_limit = get_user_preferences()
-        print(f"Will scrape {days_to_scrape} days of data, up to position {position_limit}")
         
         # Use both chart types by default
         chart_types = get_chart_types()
@@ -1438,7 +1407,7 @@ def main():
                     print(f"Latest chart date for {chart_type}: {latest_date}")
                     
                     # Generate date range starting from the actual latest date
-                    date_range = generate_date_range(latest_date, days_to_scrape)
+                    date_range = generate_date_range(latest_date, 7)  # 90 days including the latest
                     print(f"Will scrape charts for dates: {', '.join(date_range)}")
                     
                     # Process each date in our range
@@ -1450,7 +1419,7 @@ def main():
                         
                         try:
                             # Scrape the chart data - this now saves to DB incrementally
-                            data = scrape_spotify_charts(driver, url, chart_date, chart_type, conn, position_limit)
+                            data = scrape_spotify_charts(driver, url, chart_date, chart_type, conn)
                             
                             if data:
                                 print(f"✓ Successfully scraped and saved {len(data)} entries")
