@@ -161,9 +161,9 @@ def login_to_spotify(driver, email, password, is_backup=False):
         else:
             raise Exception("Login failed with both primary and backup credentials")
 
-def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection):
+def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, position_limit=50):
     """
-    Scrape chart data from top 50 entries of Spotify Charts.
+    Scrape chart data from top entries of Spotify Charts.
     
     Args:
         driver (webdriver.Chrome): The Selenium WebDriver instance.
@@ -171,6 +171,7 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection):
         chart_date (str): The date of the chart ('latest' or 'YYYY-MM-DD').
         chart_type (str): The type of chart (e.g., 'global', 'usa').
         db_connection: Database connection to save entries incrementally.
+        position_limit (int): Maximum number of positions to scrape.
 
     Returns:
         list: A list of dictionaries, where each dictionary represents a song entry.
@@ -217,21 +218,21 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection):
                 display_date = datetime.datetime.now().strftime('%Y-%m-%d')
                 print(f"Using current date: {display_date}")
         
-        print(f"\nScraping top 50 entries from {chart_type} chart for {display_date}")
+        print(f"\nScraping top {position_limit} entries from {chart_type} chart for {display_date}")
         logging.info(f"Scraping chart for date: {display_date}")
         
         # Get all chart rows
         chart_rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
         
-        # Only take the top 50 rows
-        top_20_rows = chart_rows[:50]
+        # Only take up to position_limit rows
+        top_rows = chart_rows[:position_limit]
         
-        print(f"Found {len(top_20_rows)} rows for top 20 chart entries")
-        logging.info(f"Found {len(top_20_rows)} rows for top 20 chart entries")
+        print(f"Found {len(top_rows)} rows for top {position_limit} chart entries")
+        logging.info(f"Found {len(top_rows)} rows for top {position_limit} chart entries")
 
         # Process the rows
         chart_data = []
-        for i, row in enumerate(top_20_rows):
+        for i, row in enumerate(top_rows):
             print(f"Processing entry #{i+1}...")
             
             # Take screenshot of this row
@@ -437,7 +438,7 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection):
 
 def get_release_date_with_crawl4ai(title, artist):
     """
-    Get release date information using crawl4ai, focusing only on Wikipedia.
+    Get release date information using crawl4ai, checking multiple music sources.
     
     Args:
         title (str): Song title
@@ -460,6 +461,9 @@ def get_release_date_with_crawl4ai(title, artist):
         
         # Define async function to run the crawler
         async def run_crawler():
+            # Store all found dates for voting
+            all_dates = []
+            
             async with AsyncWebCrawler() as crawler:
                 config = CrawlerRunConfig(
                     cache_mode=CacheMode.BYPASS,  # Don't use cache
@@ -468,87 +472,74 @@ def get_release_date_with_crawl4ai(title, artist):
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
                 )
                 
-                # Try Wikipedia directly - more reliable for release dates
-                # Format the Wikipedia URL for the song
-                wiki_url = f"https://en.wikipedia.org/wiki/{clean_title.replace(' ', '_')}"
-                try:
-                    print(f"Trying Wikipedia URL: {wiki_url}")
-                    wiki_result = await crawler.arun(url=wiki_url, config=config)
-                    
-                    if wiki_result and wiki_result.markdown:
-                        wiki_content = wiki_result.markdown
-                        
-                        # Look for release date in Wikipedia content
-                        date_patterns = [
-                            r'Released.*?(\d{1,2} [A-Z][a-z]+ \d{4})',  # Released: DD Month YYYY
-                            r'Released.*?([A-Z][a-z]+ \d{1,2},? \d{4})',  # Released: Month DD, YYYY
-                            r'Release date.*?(\d{1,2} [A-Z][a-z]+ \d{4})',  # Release date: DD Month YYYY
-                            r'Release date.*?([A-Z][a-z]+ \d{1,2},? \d{4})',  # Release date: Month DD, YYYY
-                            r'Released in (\d{4})',  # Released in YYYY
-                            r'Released: (\d{4})',  # Released: YYYY
-                            r'Released (\d{4})',  # Released YYYY
-                            r'(\d{4}-\d{2}-\d{2})',  # YYYY-MM-DD
-                        ]
-                        
-                        for pattern in date_patterns:
-                            matches = re.findall(pattern, wiki_content)
-                            if matches:
-                                date_str = matches[0]
-                                print(f"Found potential release date on Wikipedia: {date_str}")
-                                
-                                # Try to convert to YYYY-MM-DD format
-                                try:
-                                    # Try different date formats
-                                    for fmt in ['%Y-%m-%d', '%B %d, %Y', '%B %d %Y', '%d %B %Y']:
-                                        try:
-                                            date_obj = datetime.datetime.strptime(date_str, fmt)
-                                            formatted_date = date_obj.strftime('%Y-%m-%d')
-                                            print(f"Converted to: {formatted_date}")
-                                            return formatted_date
-                                        except ValueError:
-                                            continue
-                                    
-                                    # If we couldn't parse but found a year
-                                    year_match = re.search(r'(\d{4})', date_str)
-                                    if year_match:
-                                        year = year_match.group(1)
-                                        formatted_date = f"{year}-01-01"
-                                        print(f"Using year only: {formatted_date}")
-                                        return formatted_date
-                                except Exception as e:
-                                    print(f"Error parsing Wikipedia date: {e}")
-                except Exception as e:
-                    print(f"Error with Wikipedia search: {e}")
+                # 1. Check Wikipedia
+                wiki_date = await check_wikipedia(crawler, config, clean_title, clean_artist)
+                if wiki_date:
+                    all_dates.append(("Wikipedia", wiki_date))
                 
-                # Try artist's Wikipedia page as fallback
-                artist_wiki_url = f"https://en.wikipedia.org/wiki/{clean_artist.replace(' ', '_')}"
-                try:
-                    print(f"Trying artist Wikipedia URL: {artist_wiki_url}")
-                    artist_wiki_result = await crawler.arun(url=artist_wiki_url, config=config)
+                # 2. Check RateYourMusic
+                rym_date = await check_rateyourmusic(crawler, config, clean_title, clean_artist)
+                if rym_date:
+                    all_dates.append(("RateYourMusic", rym_date))
+                
+                # 3. Check Genius
+                genius_date = await check_genius(crawler, config, clean_title, clean_artist)
+                if genius_date:
+                    all_dates.append(("Genius", genius_date))
+                
+                # 4. Check AlbumOfTheYear
+                aoty_date = await check_albumoftheyear(crawler, config, clean_title, clean_artist)
+                if aoty_date:
+                    all_dates.append(("AlbumOfTheYear", aoty_date))
+                
+                # 5. Check Apple Music
+                apple_date = await check_apple_music(crawler, config, clean_title, clean_artist)
+                if apple_date:
+                    all_dates.append(("Apple Music", apple_date))
+                
+                # 6. Check Spotify
+                spotify_date = await check_spotify(crawler, config, clean_title, clean_artist)
+                if spotify_date:
+                    all_dates.append(("Spotify", spotify_date))
+                
+                # 7. Check YouTube
+                youtube_date = await check_youtube(crawler, config, clean_title, clean_artist)
+                if youtube_date:
+                    all_dates.append(("YouTube", youtube_date))
+                
+                # Print all found dates
+                print("\nDates found from different sources:")
+                for source, date in all_dates:
+                    print(f"- {source}: {date}")
+                
+                # If we have dates, choose the best one
+                if all_dates:
+                    # Use majority voting if possible
+                    date_counts = {}
+                    for _, date in all_dates:
+                        # Only count the year part for voting
+                        year = date.split('-')[0]
+                        date_counts[year] = date_counts.get(year, 0) + 1
                     
-                    if artist_wiki_result and artist_wiki_result.markdown:
-                        artist_wiki_content = artist_wiki_result.markdown
-                        
-                        # Look for the song name in the artist's page
-                        song_section = re.search(f"(?i).*{re.escape(clean_title)}.*", artist_wiki_content)
-                        if song_section:
-                            # Extract a section around the song mention
-                            section_start = max(0, song_section.start() - 500)
-                            section_end = min(len(artist_wiki_content), song_section.end() + 500)
-                            relevant_section = artist_wiki_content[section_start:section_end]
-                            
-                            # Look for years in this section
-                            year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', relevant_section)
-                            if year_matches:
-                                # Use the first year that appears after the song name
-                                for year in year_matches:
-                                    # Validate the year is not in the future
-                                    current_year = datetime.datetime.now().year
-                                    if int(year) <= current_year:
-                                        print(f"Found year in artist's Wikipedia page: {year}")
-                                        return f"{year}-01-01"
-                except Exception as e:
-                    print(f"Error with artist Wikipedia search: {e}")
+                    # Find the most common year
+                    most_common_year = max(date_counts.items(), key=lambda x: x[1])[0]
+                    print(f"Most common year from voting: {most_common_year}")
+                    
+                    # Find the most specific date with that year
+                    best_date = None
+                    for _, date in all_dates:
+                        if date.startswith(most_common_year):
+                            # Prefer more specific dates (not just year-01-01)
+                            if not best_date or (date != f"{most_common_year}-01-01" and best_date == f"{most_common_year}-01-01"):
+                                best_date = date
+                    
+                    if best_date:
+                        print(f"Selected best date: {best_date}")
+                        return best_date
+                    
+                    # Fallback to the first date if no best date was found
+                    print(f"Using first found date: {all_dates[0][1]}")
+                    return all_dates[0][1]
                 
                 return ""
         
@@ -560,9 +551,375 @@ def get_release_date_with_crawl4ai(title, artist):
         logging.error(f"Error getting release date with crawl4ai: {e}", exc_info=True)
         return ""
 
+async def check_wikipedia(crawler, config, title, artist):
+    """Check Wikipedia for release date."""
+    print("\nChecking Wikipedia...")
+    try:
+        # Try specific song page with artist name first (most accurate)
+        wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}_{artist.replace(' ', '_')}_song"
+        print(f"Trying specific song Wikipedia URL: {wiki_url}")
+        wiki_result = await crawler.arun(url=wiki_url, config=config)
+        
+        if wiki_result and wiki_result.markdown:
+            wiki_content = wiki_result.markdown
+            
+            # Look for song release date in Wikipedia content
+            release_date = extract_release_date_from_wiki_content(wiki_content, True)
+            if release_date:
+                return release_date
+        
+        # Try song page without artist name
+        wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+        print(f"Trying song-only Wikipedia URL: {wiki_url}")
+        wiki_result = await crawler.arun(url=wiki_url, config=config)
+        
+        if wiki_result and wiki_result.markdown:
+            wiki_content = wiki_result.markdown
+            
+            # Verify the page is about the right song by checking for artist name
+            if re.search(rf"\b{re.escape(artist)}\b", wiki_content, re.IGNORECASE):
+                print(f"Found artist name in song page, extracting release date")
+                release_date = extract_release_date_from_wiki_content(wiki_content, True)
+                if release_date:
+                    return release_date
+            else:
+                print(f"Artist name not found in song page, might be wrong song")
+        
+        # Try artist's Wikipedia page as fallback
+        artist_wiki_url = f"https://en.wikipedia.org/wiki/{artist.replace(' ', '_')}"
+        print(f"Trying artist Wikipedia URL: {artist_wiki_url}")
+        artist_wiki_result = await crawler.arun(url=artist_wiki_url, config=config)
+        
+        if artist_wiki_result and artist_wiki_result.markdown:
+            artist_wiki_content = artist_wiki_result.markdown
+            
+            # Look for the song name in the artist's page
+            song_section_match = re.search(f"(?i).*{re.escape(title)}.*", artist_wiki_content)
+            if song_section_match:
+                # Extract a section around the song mention
+                section_start = max(0, song_section_match.start() - 1000)
+                section_end = min(len(artist_wiki_content), song_section_match.end() + 1000)
+                relevant_section = artist_wiki_content[section_start:section_end]
+                
+                print(f"Found song mention in artist page, extracting release date from surrounding context")
+                # Look for release date near the song mention
+                release_date = extract_release_date_from_wiki_content(relevant_section, False)
+                if release_date:
+                    return release_date
+    except Exception as e:
+        print(f"Error with Wikipedia: {e}")
+    
+    return None
+
+async def check_rateyourmusic(crawler, config, title, artist):
+    """Check RateYourMusic for release date."""
+    print("\nChecking RateYourMusic...")
+    try:
+        # First search for the song
+        search_url = f"https://rateyourmusic.com/search?searchtype=s&searchterm={title.replace(' ', '+')}+{artist.replace(' ', '+')}"
+        print(f"Searching RYM: {search_url}")
+        search_result = await crawler.arun(url=search_url, config=config)
+        
+        if search_result and search_result.markdown:
+            # Look for song links in search results
+            song_links = re.findall(r'href="(/release/single/[^"]+)"', search_result.markdown)
+            if song_links:
+                # Visit the first result
+                song_url = f"https://rateyourmusic.com{song_links[0]}"
+                print(f"Visiting song page: {song_url}")
+                song_result = await crawler.arun(url=song_url, config=config)
+                
+                if song_result and song_result.markdown:
+                    # Look for release date
+                    date_match = re.search(r'(?:released|release date)[:\s]+(\d{1,2} [A-Za-z]+ \d{4}|\d{4})', 
+                                          song_result.markdown, re.IGNORECASE)
+                    if date_match:
+                        date_str = date_match.group(1)
+                        print(f"Found RYM date: {date_str}")
+                        
+                        # Try to parse the date
+                        try:
+                            # Try different formats
+                            for fmt in ['%d %B %Y', '%B %d %Y', '%Y']:
+                                try:
+                                    date_obj = datetime.datetime.strptime(date_str, fmt)
+                                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                                    print(f"Parsed RYM date: {formatted_date}")
+                                    return formatted_date
+                                except ValueError:
+                                    continue
+                            
+                            # If just a year was found
+                            if re.match(r'^\d{4}$', date_str):
+                                return f"{date_str}-01-01"
+                        except Exception as e:
+                            print(f"Error parsing RYM date: {e}")
+    except Exception as e:
+        print(f"Error with RateYourMusic: {e}")
+    
+    return None
+
+async def check_genius(crawler, config, title, artist):
+    """Check Genius for release date."""
+    print("\nChecking Genius...")
+    try:
+        # Search for the song
+        search_url = f"https://genius.com/search?q={title.replace(' ', '+')}+{artist.replace(' ', '+')}"
+        print(f"Searching Genius: {search_url}")
+        search_result = await crawler.arun(url=search_url, config=config)
+        
+        if search_result and search_result.markdown:
+            # Look for song links in search results
+            song_links = re.findall(r'href="(https://genius.com/[^"]+)"', search_result.markdown)
+            
+            # Filter for links that seem to be songs (not albums or artists)
+            song_links = [link for link in song_links if not ('/albums/' in link or '/artists/' in link)]
+            
+            if song_links:
+                # Visit the first result
+                song_url = song_links[0]
+                print(f"Visiting Genius song page: {song_url}")
+                song_result = await crawler.arun(url=song_url, config=config)
+                
+                if song_result and song_result.markdown:
+                    # Look for release date
+                    date_match = re.search(r'(?:Release Date|Released)[:\s]+([A-Za-z]+ \d{1,2}, \d{4}|\d{4})', 
+                                          song_result.markdown, re.IGNORECASE)
+                    if date_match:
+                        date_str = date_match.group(1)
+                        print(f"Found Genius date: {date_str}")
+                        
+                        # Try to parse the date
+                        try:
+                            # Try different formats
+                            for fmt in ['%B %d, %Y', '%Y']:
+                                try:
+                                    date_obj = datetime.datetime.strptime(date_str, fmt)
+                                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                                    print(f"Parsed Genius date: {formatted_date}")
+                                    return formatted_date
+                                except ValueError:
+                                    continue
+                            
+                            # If just a year was found
+                            if re.match(r'^\d{4}$', date_str):
+                                return f"{date_str}-01-01"
+                        except Exception as e:
+                            print(f"Error parsing Genius date: {e}")
+    except Exception as e:
+        print(f"Error with Genius: {e}")
+    
+    return None
+
+async def check_albumoftheyear(crawler, config, title, artist):
+    """Check AlbumOfTheYear for release date."""
+    print("\nChecking AlbumOfTheYear...")
+    try:
+        # Search for the song
+        search_url = f"https://www.albumoftheyear.org/search/?q={title.replace(' ', '+')}+{artist.replace(' ', '+')}"
+        print(f"Searching AOTY: {search_url}")
+        search_result = await crawler.arun(url=search_url, config=config)
+        
+        if search_result and search_result.markdown:
+            # Look for song links in search results
+            song_links = re.findall(r'href="(/song/[^"]+)"', search_result.markdown)
+            if song_links:
+                # Visit the first result
+                song_url = f"https://www.albumoftheyear.org{song_links[0]}"
+                print(f"Visiting AOTY song page: {song_url}")
+                song_result = await crawler.arun(url=song_url, config=config)
+                
+                if song_result and song_result.markdown:
+                    # Look for release date
+                    date_match = re.search(r'(?:Release Date)[:\s]+([A-Za-z]+ \d{1,2}, \d{4}|\d{4})', 
+                                          song_result.markdown, re.IGNORECASE)
+                    if date_match:
+                        date_str = date_match.group(1)
+                        print(f"Found AOTY date: {date_str}")
+                        
+                        # Try to parse the date
+                        try:
+                            # Try different formats
+                            for fmt in ['%B %d, %Y', '%Y']:
+                                try:
+                                    date_obj = datetime.datetime.strptime(date_str, fmt)
+                                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                                    print(f"Parsed AOTY date: {formatted_date}")
+                                    return formatted_date
+                                except ValueError:
+                                    continue
+                            
+                            # If just a year was found
+                            if re.match(r'^\d{4}$', date_str):
+                                return f"{date_str}-01-01"
+                        except Exception as e:
+                            print(f"Error parsing AOTY date: {e}")
+    except Exception as e:
+        print(f"Error with AlbumOfTheYear: {e}")
+    
+    return None
+
+async def check_apple_music(crawler, config, title, artist):
+    """Check Apple Music for release date."""
+    print("\nChecking Apple Music...")
+    try:
+        # Search for the song
+        search_url = f"https://music.apple.com/us/search?term={title.replace(' ', '+')}+{artist.replace(' ', '+')}"
+        print(f"Searching Apple Music: {search_url}")
+        search_result = await crawler.arun(url=search_url, config=config)
+        
+        if search_result and search_result.markdown:
+            # Look for song links in search results
+            song_links = re.findall(r'href="(https://music.apple.com/us/[^"]+)"', search_result.markdown)
+            
+            # Filter for links that seem to be songs
+            song_links = [link for link in song_links if '/song/' in link]
+            
+            if song_links:
+                # Visit the first result
+                song_url = song_links[0]
+                print(f"Visiting Apple Music song page: {song_url}")
+                song_result = await crawler.arun(url=song_url, config=config)
+                
+                if song_result and song_result.markdown:
+                    # Look for release date
+                    date_match = re.search(r'(?:RELEASED|Release Date)[:\s]+([A-Za-z]+ \d{1,2}, \d{4}|\d{4})', 
+                                          song_result.markdown, re.IGNORECASE)
+                    if date_match:
+                        date_str = date_match.group(1)
+                        print(f"Found Apple Music date: {date_str}")
+                        
+                        # Try to parse the date
+                        try:
+                            # Try different formats
+                            for fmt in ['%B %d, %Y', '%Y']:
+                                try:
+                                    date_obj = datetime.datetime.strptime(date_str, fmt)
+                                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                                    print(f"Parsed Apple Music date: {formatted_date}")
+                                    return formatted_date
+                                except ValueError:
+                                    continue
+                            
+                            # If just a year was found
+                            if re.match(r'^\d{4}$', date_str):
+                                return f"{date_str}-01-01"
+                        except Exception as e:
+                            print(f"Error parsing Apple Music date: {e}")
+    except Exception as e:
+        print(f"Error with Apple Music: {e}")
+    
+    return None
+
+async def check_spotify(crawler, config, title, artist):
+    """Check Spotify for release date."""
+    print("\nChecking Spotify...")
+    try:
+        # Search using Google since direct Spotify search might not work well
+        search_url = f"https://www.google.com/search?q=site:open.spotify.com+{title.replace(' ', '+')}+{artist.replace(' ', '+')}"
+        print(f"Searching for Spotify links: {search_url}")
+        search_result = await crawler.arun(url=search_url, config=config)
+        
+        if search_result and search_result.markdown:
+            # Look for Spotify track links in search results
+            spotify_links = re.findall(r'(https://open.spotify.com/track/[^"&\s]+)', search_result.markdown)
+            
+            if spotify_links:
+                # Visit the first result
+                spotify_url = spotify_links[0]
+                print(f"Visiting Spotify track page: {spotify_url}")
+                spotify_result = await crawler.arun(url=spotify_url, config=config)
+                
+                if spotify_result and spotify_result.markdown:
+                    # Look for release date
+                    date_match = re.search(r'(?:release date|released)[:\s]+([A-Za-z]+ \d{1,2}, \d{4}|\d{1,2} [A-Za-z]+ \d{4}|\d{4})', 
+                                          spotify_result.markdown, re.IGNORECASE)
+                    if date_match:
+                        date_str = date_match.group(1)
+                        print(f"Found Spotify date: {date_str}")
+                        
+                        # Try to parse the date
+                        try:
+                            # Try different formats
+                            for fmt in ['%B %d, %Y', '%d %B %Y', '%Y']:
+                                try:
+                                    date_obj = datetime.datetime.strptime(date_str, fmt)
+                                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                                    print(f"Parsed Spotify date: {formatted_date}")
+                                    return formatted_date
+                                except ValueError:
+                                    continue
+                            
+                            # If just a year was found
+                            if re.match(r'^\d{4}$', date_str):
+                                return f"{date_str}-01-01"
+                        except Exception as e:
+                            print(f"Error parsing Spotify date: {e}")
+    except Exception as e:
+        print(f"Error with Spotify: {e}")
+    
+    return None
+
+async def check_youtube(crawler, config, title, artist):
+    """Check YouTube for release date."""
+    print("\nChecking YouTube...")
+    try:
+        # Prefer "official audio" in search
+        search_url = f"https://www.youtube.com/results?search_query={title.replace(' ', '+')}+{artist.replace(' ', '+')}+official+audio"
+        print(f"Searching YouTube (official audio): {search_url}")
+        search_result = await crawler.arun(url=search_url, config=config)
+        
+        if search_result and search_result.markdown:
+            # Look for video links in search results
+            video_links = re.findall(r'href="(/watch\?v=[^"&]+)"', search_result.markdown)
+            
+            # If no "official audio" found, try "official video"
+            if not video_links:
+                search_url = f"https://www.youtube.com/results?search_query={title.replace(' ', '+')}+{artist.replace(' ', '+')}+official+video"
+                print(f"Searching YouTube (official video): {search_url}")
+                search_result = await crawler.arun(url=search_url, config=config)
+                if search_result and search_result.markdown:
+                    video_links = re.findall(r'href="(/watch\?v=[^"&]+)"', search_result.markdown)
+            
+            if video_links:
+                # Visit the first result
+                video_url = f"https://www.youtube.com{video_links[0]}"
+                print(f"Visiting YouTube video: {video_url}")
+                video_result = await crawler.arun(url=video_url, config=config)
+                
+                if video_result and video_result.markdown:
+                    # Look for upload date
+                    date_match = re.search(r'(?:Published|Uploaded|Premiered)[:\s]+([A-Za-z]+ \d{1,2}, \d{4}|\d{4})', 
+                                          video_result.markdown, re.IGNORECASE)
+                    if date_match:
+                        date_str = date_match.group(1)
+                        print(f"Found YouTube date: {date_str}")
+                        
+                        # Try to parse the date
+                        try:
+                            # Try different formats
+                            for fmt in ['%B %d, %Y', '%Y']:
+                                try:
+                                    date_obj = datetime.datetime.strptime(date_str, fmt)
+                                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                                    print(f"Parsed YouTube date: {formatted_date}")
+                                    return formatted_date
+                                except ValueError:
+                                    continue
+                            
+                            # If just a year was found
+                            if re.match(r'^\d{4}$', date_str):
+                                return f"{date_str}-01-01"
+                        except Exception as e:
+                            print(f"Error parsing YouTube date: {e}")
+    except Exception as e:
+        print(f"Error with YouTube: {e}")
+    
+    return None
+
 def get_release_date(title, artist):
     """
-    Get release date using crawl4ai, with caching and improved debugging.
+    Get release date using multiple sources with majority voting.
     
     Args:
         title (str): Song title
@@ -581,38 +938,75 @@ def get_release_date(title, artist):
         print(f"Using cached release date: {musicbrainz_cache[track_key]}")
         return musicbrainz_cache[track_key]
     
-    # Try crawl4ai
-    print("\nTrying crawl4ai...")
+    # Try crawl4ai with multiple sources
+    print("\nTrying multi-source release date detection...")
     try:
         release_date = get_release_date_with_crawl4ai(title, artist)
         if release_date:
-            print(f"✓ Found release date with crawl4ai: {release_date}")
+            # Validate the release date - ensure it's not in the future
+            try:
+                release_date_obj = datetime.datetime.strptime(release_date, '%Y-%m-%d')
+                current_date = datetime.datetime.now()
+                
+                # If the release date is in the future, it's likely incorrect
+                if release_date_obj > current_date:
+                    print(f"⚠️ Detected future release date: {release_date}. This is likely incorrect.")
+                    # Use just the year if it's valid
+                    year_match = re.search(r'(\d{4})', release_date)
+                    if year_match:
+                        year = year_match.group(1)
+                        # If year is also in the future, use current year - 1
+                        if int(year) > current_date.year:
+                            corrected_date = f"{current_date.year-1}-01-01"
+                            print(f"Using last year as default: {corrected_date}")
+                        else:
+                            corrected_date = f"{year}-01-01"
+                        print(f"Corrected to: {corrected_date}")
+                        release_date = corrected_date
+                    else:
+                        # If we can't extract a year, use empty string
+                        print("Could not correct the date. Using empty string.")
+                        release_date = ""
+            except Exception as e:
+                print(f"Error validating release date: {e}")
             
-            # Cache the successful result
-            musicbrainz_cache[track_key] = release_date
-            return release_date
+            if release_date:
+                print(f"✓ Found release date: {release_date}")
+                
+                # Cache the successful result
+                musicbrainz_cache[track_key] = release_date
+                return release_date
         else:
-            print(f"✗ No release date found with crawl4ai")
+            print(f"✗ No release date found from any source")
     except Exception as e:
-        print(f"✗ Error with crawl4ai: {e}")
-        logging.error(f"Error with crawl4ai: {e}", exc_info=True)
+        print(f"✗ Error getting release date: {e}")
+        logging.error(f"Error getting release date: {e}", exc_info=True)
     
-    # If crawl4ai failed, try a simpler approach - extract year from title or artist context
+    # If all else failed, try a simpler approach - extract year from title or artist context
     print("\nTrying to extract year from title or artist context...")
     year_match = re.search(r'(19\d{2}|20\d{2})', f"{title} {artist}")
     if year_match:
         year = year_match.group(1)
-        print(f"Extracted year from context: {year}")
+        # Ensure the year is not in the future
+        current_year = datetime.datetime.now().year
+        if int(year) > current_year:
+            year = str(current_year - 1)  # Use last year as a safe default
+            print(f"Found future year, using last year instead: {year}")
+        else:
+            print(f"Extracted year from context: {year}")
+        
         release_date = f"{year}-01-01"
         
         # Cache this result too
         musicbrainz_cache[track_key] = release_date
         return release_date
     
-    # If everything failed
-    print("✗ Could not determine release date from any source")
-    musicbrainz_cache[track_key] = ""
-    return ""
+    # If everything failed, use a reasonable default (last year)
+    default_year = datetime.datetime.now().year - 1
+    release_date = f"{default_year}-01-01"
+    print(f"✗ Could not determine release date from any source. Using default: {release_date}")
+    musicbrainz_cache[track_key] = release_date
+    return release_date
 
 def setup_database():
     """
@@ -1159,9 +1553,9 @@ def process_chart_data(conn, chart_type, chart_date):
             # Add current entry
             try:
                 current_streams = int(streams.replace(',', '') if isinstance(streams, str) else streams)
-                current_position_int = int(position)
+                current_position = int(position)
                 stream_values.append(current_streams)
-                position_values.append(current_position_int)
+                position_values.append(current_position)
                 
                 # Add previous days' data
                 for i in range(1, rolling_window):
@@ -1360,11 +1754,34 @@ def get_chart_types():
     """Return predefined chart types to scrape."""
     return ['global', 'usa']  # Both chart types
 
+def get_user_preferences():
+    """Get user preferences for scraping."""
+    try:
+        # Ask for number of days to scrape
+        days_input = input("How many days of chart data would you like to scrape? (default: 30): ")
+        days = int(days_input) if days_input.strip() else 30
+        
+        # Ask for position limit
+        position_input = input("Up to what position would you like to scrape? (default: 50, max: 200): ")
+        position_limit = int(position_input) if position_input.strip() else 50
+        
+        # Ensure position limit is within acceptable range
+        position_limit = min(max(position_limit, 1), 200)
+        
+        return days, position_limit
+    except ValueError:
+        print("Invalid input. Using default values: 30 days, top 50 positions.")
+        return 30, 50
+
 def main():
     try:
         print("\n" + "="*50)
         print("SPOTIFY CHARTS SCRAPER - IMPROVED VERSION".center(50))
         print("="*50)
+        
+        # Get user preferences
+        days_to_scrape, position_limit = get_user_preferences()
+        print(f"Will scrape {days_to_scrape} days of data, up to position {position_limit}")
         
         # Use both chart types by default
         chart_types = get_chart_types()
@@ -1407,7 +1824,7 @@ def main():
                     print(f"Latest chart date for {chart_type}: {latest_date}")
                     
                     # Generate date range starting from the actual latest date
-                    date_range = generate_date_range(latest_date, 7)  # 90 days including the latest
+                    date_range = generate_date_range(latest_date, days_to_scrape)
                     print(f"Will scrape charts for dates: {', '.join(date_range)}")
                     
                     # Process each date in our range
@@ -1419,7 +1836,7 @@ def main():
                         
                         try:
                             # Scrape the chart data - this now saves to DB incrementally
-                            data = scrape_spotify_charts(driver, url, chart_date, chart_type, conn)
+                            data = scrape_spotify_charts(driver, url, chart_date, chart_type, conn, position_limit)
                             
                             if data:
                                 print(f"✓ Successfully scraped and saved {len(data)} entries")
