@@ -15,6 +15,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import time
 from tqdm import tqdm
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+import traceback
 
 # Configure logging
 logging.basicConfig(filename='spotify_scraper.log', level=logging.INFO,
@@ -28,30 +29,24 @@ PASSWORD = "Poop12345#"            # Your Spotify password
 BACKUP_EMAIL = "rofeto2117@cotigz.com"
 BACKUP_PASSWORD = "KirklandA1"
 
-# Cache for release dates to avoid redundant lookups
+# Cache for release dates to avoid redundant lookups within a single run
 release_date_cache = {}
 
-# File to store cached release dates between runs
+# File to store cached release dates between runs (no longer used for persistence)
 RELEASE_DATE_CACHE_FILE = 'release_dates_cache.json'
 
 def load_release_date_cache():
-    """Load the release date cache from file."""
+    """Initialize an empty release date cache for this program run."""
     global release_date_cache
-    try:
-        if os.path.exists(RELEASE_DATE_CACHE_FILE):
-            with open(RELEASE_DATE_CACHE_FILE, 'r') as f:
-                release_date_cache = json.load(f)
-                print(f"Loaded {len(release_date_cache)} cached release dates")
-    except Exception as e:
-        print(f"Error loading release date cache: {e}")
-        release_date_cache = {}
+    release_date_cache = {}
+    print("Initialized empty release date cache for this program run")
 
 def save_release_date_cache():
-    """Save the release date cache to file."""
+    """Save the release date cache to file (only for the current run's reference)."""
     try:
         with open(RELEASE_DATE_CACHE_FILE, 'w') as f:
             json.dump(release_date_cache, f)
-            print(f"Saved {len(release_date_cache)} release dates to cache")
+            print(f"Saved {len(release_date_cache)} release dates to cache file (for reference only)")
     except Exception as e:
         print(f"Error saving release date cache: {e}")
 
@@ -256,20 +251,6 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
         print(f"Found {len(top_rows)} rows for top {position_limit} chart entries")
         logging.info(f"Found {len(top_rows)} rows for top {position_limit} chart entries")
 
-        # Initialize crawl4ai for release date extraction
-        print("Initializing crawl4ai for release date extraction...")
-        # Create a single crawler instance to reuse for all songs
-        crawler = AsyncWebCrawler()
-        
-        # Configure crawl4ai
-        config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,  # Don't use cache
-            wait_until='domcontentloaded',  # Less strict wait condition to avoid timeouts
-            verbose=True,  # Enable verbose logging
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-            page_timeout=30000  # 30 seconds timeout
-        )
-
         # Process the rows
         chart_data = []
         
@@ -443,42 +424,29 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
                             print(f"Using cached release date for '{title}' by '{artist}': {release_date}")
                             entry_data["release_date"] = release_date
                         else:
-                            # Get release date using crawl4ai
+                            # Get release date using direct Selenium extraction
                             try:
-                                print(f"Getting release date for '{title}' by '{artist}' using crawl4ai...")
-                                # Click on the row to expand it (still need to do this with Selenium)
-                                driver.execute_script("arguments[0].click();", row)
-                                time.sleep(1)  # Wait for expansion animation
+                                print(f"Getting release date for '{title}' by '{artist}' using Selenium...")
                                 
-                                # Get the current URL to use with crawl4ai
-                                current_url = driver.current_url
+                                # Extract release date with Selenium
+                                release_date = extract_release_date_with_selenium(driver, row, title, artist)
                                 
-                                # Use crawl4ai to extract the release date from the expanded details
-                                release_date = loop.run_until_complete(get_release_date_with_crawl4ai(
-                                    crawler, 
-                                    config,
-                                    current_url, 
-                                    title, 
-                                    artist,
-                                    position
-                                ))
-                                
-                                # Store the release date in cache
-                                release_date_cache[cache_key] = release_date
+                                # Store the release date in cache ONLY if a valid date was found
+                                if release_date:
+                                    release_date_cache[cache_key] = release_date
+                                    print(f"Added release date to cache: {title} by {artist} -> {release_date}")
+                                    
+                                    # Save cache periodically (every 10 entries)
+                                    if i % 10 == 0:
+                                        save_release_date_cache()
+                                else:
+                                    print(f"No valid release date found for {title} by {artist}, not adding to cache")
                                 
                                 # Store the release date in entry data
                                 entry_data["release_date"] = release_date
                                 
-                                # Save cache periodically (every 10 entries)
-                                if i % 10 == 0:
-                                    save_release_date_cache()
-                                
-                                # Close the expanded details by clicking elsewhere
-                                driver.execute_script("arguments[0].click();", cells[0])
-                                time.sleep(0.5)
-                                
                             except Exception as e:
-                                print(f"Error getting release date with crawl4ai: {e}")
+                                print(f"Error getting release date: {e}")
                                 entry_data["release_date"] = ""
                         
                         # Process historical data
@@ -519,7 +487,6 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
         finally:
             # Clean up the event loop and crawler
             loop.close()
-            crawler.close()
             
             # Save cache at the end
             save_release_date_cache()
@@ -531,87 +498,159 @@ def scrape_spotify_charts(driver, url, chart_date, chart_type, db_connection, po
 
 async def get_release_date_with_crawl4ai(crawler, config, url, title, artist, position):
     """
-    Extract release date from a Spotify Charts page using crawl4ai.
+    This is now a placeholder function that just returns an empty string.
+    We'll use the Selenium-based extraction method instead.
+    """
+    print(f"Crawl4AI approach not working for {title} by {artist}. Using Selenium method instead.")
+    return ""
+
+def extract_release_date_with_selenium(driver, row, title, artist):
+    """
+    Extract release date directly using Selenium by clicking on the row and reading the expanded details.
     
     Args:
-        crawler: AsyncWebCrawler instance
-        config: CrawlerRunConfig instance
-        url: URL of the Spotify chart page
+        driver (webdriver.Chrome): The Selenium WebDriver instance.
+        row: The row element containing the song data.
         title: Song title
         artist: Artist name
-        position: Chart position (used to identify the correct expanded row)
         
     Returns:
         str: Release date in YYYY-MM-DD format or empty string if not found
     """
     try:
-        print(f"Extracting release date for {title} by {artist} using crawl4ai...")
+        print(f"Extracting release date for '{title}' by '{artist}' using Selenium...")
         
-        # Crawl the page
-        result = await crawler.arun(url=url, config=config)
+        # First, make sure the row is in view
+        driver.execute_script("arguments[0].scrollIntoView();", row)
+        time.sleep(0.5)
         
-        if not result or not result.markdown:
-            print("No content returned from crawl4ai")
+        # Try to click on the row to expand it
+        try:
+            driver.execute_script("arguments[0].click();", row)
+            print(f"Clicked on row for '{title}'")
+            # Wait for expansion animation to complete
+            time.sleep(1.5)
+        except Exception as e:
+            print(f"Error clicking row: {e}")
             return ""
-        
-        # Look for expanded details section that contains our song
-        content = result.markdown
-        
-        # First try to find a section that contains both the title and artist
-        title_artist_pattern = re.escape(title) + r'.*?' + re.escape(artist)
-        song_section_match = re.search(title_artist_pattern, content, re.IGNORECASE | re.DOTALL)
-        
-        if not song_section_match:
-            # Try just the title as fallback
-            song_section_match = re.search(re.escape(title), content, re.IGNORECASE)
-        
-        if song_section_match:
-            # Extract a section around the song mention (look for release date nearby)
-            section_start = max(0, song_section_match.start() - 1000)
-            section_end = min(len(content), song_section_match.end() + 1000)
-            relevant_section = content[section_start:section_end]
             
-            # Look for release date patterns in the relevant section
-            date_patterns = [
-                r'(?:release date|released|published)(?:\s+on)?(?:\s*:)?\s+([A-Za-z]+ \d{1,2},? \d{4})',
-                r'(?:release date|released|published)(?:\s+on)?(?:\s*:)?\s+(\d{1,2} [A-Za-z]+ \d{4})',
-                r'(\d{4}-\d{2}-\d{2})',
-                r'(\d{1,2}/\d{1,2}/\d{4})'
+        # Now look for the Release Date in the expanded section
+        try:
+            # Take a screenshot for debugging
+            debug_screenshot = f"debug_expanded_{title.replace(' ', '_')[:10]}.png"
+            driver.save_screenshot(debug_screenshot)
+            print(f"Saved screenshot to {debug_screenshot}")
+            
+            # Try multiple CSS selectors to find release date
+            selectors = [
+                # Exact selector based on class names
+                "div.ExpandedRowTable__ExpandedRowTitle-aasrut-2:contains('Release Date') + div.ExpandedRowTable__ExpandedRowSubtitle-aasrut-1",
+                # More general selectors
+                "div:contains('Release Date') + div",
+                "[data-testid='release-date']",
+                ".ExpandedRowTable__ExpandedRow div:contains('Release Date')",
+                # Try XPath
+                "//div[contains(text(),'Release Date')]/following-sibling::div[1]"
             ]
             
-            for pattern in date_patterns:
-                date_match = re.search(pattern, relevant_section, re.IGNORECASE)
-                if date_match:
-                    date_str = date_match.group(1)
-                    print(f"Found date pattern: '{date_str}'")
+            release_date = ""
+            for selector in selectors:
+                try:
+                    if selector.startswith("//"):
+                        # This is an XPath selector
+                        elements = driver.find_elements(By.XPATH, selector)
+                    else:
+                        # This is a CSS selector
+                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
                     
-                    # Try to parse the date
-                    for fmt in ["%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%d %b %Y", "%m/%d/%Y", "%d/%m/%Y"]:
-                        try:
-                            date_obj = datetime.datetime.strptime(date_str, fmt)
-                            formatted_date = date_obj.strftime('%Y-%m-%d')
-                            print(f"Parsed release date: {formatted_date}")
-                            return formatted_date
-                        except ValueError:
-                            continue
+                    if elements and len(elements) > 0:
+                        for element in elements:
+                            text = element.text.strip()
+                            print(f"Found element with text: '{text}'")
+                            
+                            # Check if this looks like a date
+                            if re.search(r'[A-Za-z]+ \d{1,2},? \d{4}', text):
+                                release_date = text
+                                print(f"Found release date: '{release_date}'")
+                                break
+                        
+                        if release_date:
+                            break
+                except Exception as e:
+                    print(f"Error with selector {selector}: {e}")
+                    continue
             
-            # If we still don't have a release date, look for just a year
-            year_match = re.search(r'\b(19\d{2}|20\d{2})\b', relevant_section)
-            if year_match:
-                year = year_match.group(1)
-                # Validate the year is not in the future
-                current_year = datetime.datetime.now().year
-                if int(year) <= current_year:
-                    release_date = f"{year}-01-01"
-                    print(f"Using year only for release date: {release_date}")
-                    return release_date
+            # If we didn't find it with selectors, try getting all the expanded content
+            if not release_date:
+                print("Trying to find release date in all expanded content...")
+                
+                # First look for the expanded table
+                expanded_rows = driver.find_elements(By.CSS_SELECTOR, ".ExpandedRowTable__StyledTable tr")
+                
+                for expanded_row in expanded_rows:
+                    row_text = expanded_row.text
+                    print(f"Expanded row text: '{row_text}'")
+                    
+                    if "Release Date" in row_text:
+                        # This row contains the release date
+                        # Format is typically "Release Date\nSep 26, 2024"
+                        date_match = re.search(r'Release Date\s+(.*)', row_text)
+                        if date_match:
+                            release_date = date_match.group(1).strip()
+                            print(f"Found release date in row text: '{release_date}'")
+                            break
+            
+            # If we still don't have it, look at the entire page source
+            if not release_date:
+                print("Searching in page source...")
+                page_source = driver.page_source
+                
+                # First look for the expanded row pattern
+                source_match = re.search(r'<div[^>]*>Release Date</div>\s*<div[^>]*>([^<]+)</div>', page_source)
+                if source_match:
+                    release_date = source_match.group(1).strip()
+                    print(f"Found release date in page source: '{release_date}'")
+            
+            # If we found a date, parse it
+            if release_date:
+                try:
+                    # Try abbreviated month format first (Sep 26, 2024)
+                    date_obj = datetime.datetime.strptime(release_date, "%b %d, %Y")
+                    formatted_date = date_obj.strftime('%Y-%m-%d')
+                    print(f"Successfully parsed release date: {formatted_date}")
+                    return formatted_date
+                except ValueError:
+                    try:
+                        # Try full month format (September 26, 2024)
+                        date_obj = datetime.datetime.strptime(release_date, "%B %d, %Y")
+                        formatted_date = date_obj.strftime('%Y-%m-%d')
+                        print(f"Successfully parsed release date: {formatted_date}")
+                        return formatted_date
+                    except ValueError:
+                        print(f"Could not parse date: {release_date}")
+            
+            print("Could not find release date in expanded row")
+            return ""
+            
+        except Exception as e:
+            print(f"Error extracting release date: {e}")
+            return ""
         
-        print(f"Could not find release date for {title} by {artist}")
-        return ""
+        finally:
+            # Close the expanded row by clicking somewhere else
+            try:
+                # Click on the position cell (first cell) to close it
+                position_cell = row.find_element(By.CSS_SELECTOR, "td:first-child")
+                driver.execute_script("arguments[0].click();", position_cell)
+                time.sleep(0.5)
+            except:
+                # If that fails, just click on the body
+                driver.execute_script("document.body.click();")
+                time.sleep(0.5)
         
     except Exception as e:
-        print(f"Error extracting release date with crawl4ai: {e}")
-        logging.error(f"Error extracting release date with crawl4ai: {e}", exc_info=True)
+        print(f"Error in release date extraction: {e}")
+        traceback.print_exc()
         return ""
 
 def setup_database():
@@ -1385,7 +1424,7 @@ def main():
         print("SPOTIFY CHARTS SCRAPER - IMPROVED VERSION".center(50))
         print("="*50)
         
-        # Load release date cache
+        # Initialize a fresh release date cache for this run
         load_release_date_cache()
         
         # Get user preferences
