@@ -534,85 +534,23 @@ def extract_release_date_with_selenium(driver, row, title, artist):
             print(f"Error clicking row: {e}")
             return ""
             
-        # Now look for the Release Date in the expanded section
+        # Now look for the Release Date in the expanded section using XPath
         try:
-            # Take a screenshot for debugging
-            debug_screenshot = f"debug_expanded_{title.replace(' ', '_')[:10]}.png"
-            driver.save_screenshot(debug_screenshot)
-            print(f"Saved screenshot to {debug_screenshot}")
+            # Look for the release date subtitle element that follows the title
+            # First try with the full class names
+            release_date_elements = driver.find_elements(By.XPATH, 
+                "//div[contains(@class, 'ExpandedRowTable__ExpandedRowTitle-aasrut-2') and contains(text(), 'Release Date')]/following-sibling::div[contains(@class, 'ExpandedRowTable__ExpandedRowSubtitle-aasrut-1')]")
             
-            # Try multiple CSS selectors to find release date
-            selectors = [
-                # Exact selector based on class names
-                "div.ExpandedRowTable__ExpandedRowTitle-aasrut-2:contains('Release Date') + div.ExpandedRowTable__ExpandedRowSubtitle-aasrut-1",
-                # More general selectors
-                "div:contains('Release Date') + div",
-                "[data-testid='release-date']",
-                ".ExpandedRowTable__ExpandedRow div:contains('Release Date')",
-                # Try XPath
-                "//div[contains(text(),'Release Date')]/following-sibling::div[1]"
-            ]
+            if not release_date_elements:
+                # Try alternative class names if the first one doesn't work
+                release_date_elements = driver.find_elements(By.XPATH, 
+                    "//div[contains(@class, 'jZdEPN') and contains(text(), 'Release Date')]/following-sibling::div[contains(@class, 'fXIjpk')]")
             
-            release_date = ""
-            for selector in selectors:
-                try:
-                    if selector.startswith("//"):
-                        # This is an XPath selector
-                        elements = driver.find_elements(By.XPATH, selector)
-                    else:
-                        # This is a CSS selector
-                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    
-                    if elements and len(elements) > 0:
-                        for element in elements:
-                            text = element.text.strip()
-                            print(f"Found element with text: '{text}'")
-                            
-                            # Check if this looks like a date
-                            if re.search(r'[A-Za-z]+ \d{1,2},? \d{4}', text):
-                                release_date = text
-                                print(f"Found release date: '{release_date}'")
-                                break
-                        
-                        if release_date:
-                            break
-                except Exception as e:
-                    print(f"Error with selector {selector}: {e}")
-                    continue
-            
-            # If we didn't find it with selectors, try getting all the expanded content
-            if not release_date:
-                print("Trying to find release date in all expanded content...")
+            if release_date_elements:
+                release_date = release_date_elements[0].text.strip()
+                print(f"Found release date: '{release_date}'")
                 
-                # First look for the expanded table
-                expanded_rows = driver.find_elements(By.CSS_SELECTOR, ".ExpandedRowTable__StyledTable tr")
-                
-                for expanded_row in expanded_rows:
-                    row_text = expanded_row.text
-                    print(f"Expanded row text: '{row_text}'")
-                    
-                    if "Release Date" in row_text:
-                        # This row contains the release date
-                        # Format is typically "Release Date\nSep 26, 2024"
-                        date_match = re.search(r'Release Date\s+(.*)', row_text)
-                        if date_match:
-                            release_date = date_match.group(1).strip()
-                            print(f"Found release date in row text: '{release_date}'")
-                            break
-            
-            # If we still don't have it, look at the entire page source
-            if not release_date:
-                print("Searching in page source...")
-                page_source = driver.page_source
-                
-                # First look for the expanded row pattern
-                source_match = re.search(r'<div[^>]*>Release Date</div>\s*<div[^>]*>([^<]+)</div>', page_source)
-                if source_match:
-                    release_date = source_match.group(1).strip()
-                    print(f"Found release date in page source: '{release_date}'")
-            
-            # If we found a date, parse it
-            if release_date:
+                # Parse the date
                 try:
                     # Try abbreviated month format first (Sep 26, 2024)
                     date_obj = datetime.datetime.strptime(release_date, "%b %d, %Y")
